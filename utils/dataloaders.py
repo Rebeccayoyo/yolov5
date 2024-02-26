@@ -25,7 +25,7 @@ import yaml
 from PIL import ExifTags, Image, ImageOps
 from torch.utils.data import DataLoader, Dataset, dataloader, distributed
 from tqdm import tqdm
-
+import asyncio
 from utils.augmentations import (
     Albumentations,
     augment_hsv,
@@ -173,6 +173,7 @@ def create_dataloader(
     prefix="",
     shuffle=False,
     seed=0,
+    input_ch=3,
 ):
     if rect and shuffle:
         LOGGER.warning("WARNING ⚠️ --rect is incompatible with DataLoader shuffle, setting shuffle=False")
@@ -192,6 +193,7 @@ def create_dataloader(
             image_weights=image_weights,
             prefix=prefix,
             rank=rank,
+            input_ch = input_ch
         )
 
     batch_size = min(batch_size, len(dataset))
@@ -551,6 +553,7 @@ class LoadImagesAndLabels(Dataset):
         prefix="",
         rank=-1,
         seed=0,
+        input_ch=3,
     ):
         self.img_size = img_size
         self.augment = augment
@@ -562,7 +565,7 @@ class LoadImagesAndLabels(Dataset):
         self.stride = stride
         self.path = path
         self.albumentations = Albumentations(size=img_size) if augment else None
-
+        self.input_ch = input_ch
         try:
             f = []  # image files
             for p in path if isinstance(path, list) else [path]:
@@ -646,7 +649,6 @@ class LoadImagesAndLabels(Dataset):
                     self.segments[i] = [segment[idx] for idx, elem in enumerate(j) if elem]
             if single_cls:  # single-class training, merge all classes into 0
                 self.labels[i][:, 0] = 0
-
         # Rectangular Training
         if self.rect:
             # Sort by aspect ratio
@@ -832,10 +834,13 @@ class LoadImagesAndLabels(Dataset):
         if nl:
             labels_out[:, 1:] = torch.from_numpy(labels)
 
-        # Convert
-        img = img.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
-        img = np.ascontiguousarray(img)
-
+        if self.input_ch == 3:
+            # Convert
+            img = img.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
+            img = np.ascontiguousarray(img)
+        elif self.input_ch == 1:
+            img = np.expand_dims(img[:,:,0],0)
+            img = np.ascontiguousarray(img)
         return torch.from_numpy(img), labels_out, self.im_files[index], shapes
 
     def load_image(self, i):

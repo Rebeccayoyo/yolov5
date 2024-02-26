@@ -43,7 +43,7 @@ ROOT = FILE.parents[0]  # YOLOv5 root directory
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))  # add ROOT to PATH
 ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
-
+sys.path.append('./yolov5')
 import val as validate  # for end-of-epoch mAP
 from models.experimental import attempt_load
 from models.yolo import Model
@@ -93,14 +93,14 @@ from utils.torch_utils import (
     smart_resume,
     torch_distributed_zero_first,
 )
-
+import asyncio
 LOCAL_RANK = int(os.getenv("LOCAL_RANK", -1))  # https://pytorch.org/docs/stable/elastic/run.html
 RANK = int(os.getenv("RANK", -1))
 WORLD_SIZE = int(os.getenv("WORLD_SIZE", 1))
 GIT_INFO = check_git_info()
 
 
-def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictionary
+async def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictionary
     save_dir, epochs, batch_size, weights, single_cls, evolve, data, cfg, resume, noval, nosave, workers, freeze = (
         Path(opt.save_dir),
         opt.epochs,
@@ -156,6 +156,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         # Register actions
         for k in methods(loggers):
             callbacks.register_action(k, callback=getattr(loggers, k))
+            await asyncio.sleep(0.001)
 
         # Process custom dataset artifact link
         data_dict = loggers.remote_dataset
@@ -180,14 +181,14 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         with torch_distributed_zero_first(LOCAL_RANK):
             weights = attempt_download(weights)  # download if not found locally
         ckpt = torch.load(weights, map_location="cpu")  # load checkpoint to CPU to avoid CUDA memory leak
-        model = Model(cfg or ckpt["model"].yaml, ch=3, nc=nc, anchors=hyp.get("anchors")).to(device)  # create
+        model = Model(cfg or ckpt["model"].yaml, ch=opt.input_ch, nc=nc, anchors=hyp.get("anchors")).to(device)  # create
         exclude = ["anchor"] if (cfg or hyp.get("anchors")) and not resume else []  # exclude keys
         csd = ckpt["model"].float().state_dict()  # checkpoint state_dict as FP32
         csd = intersect_dicts(csd, model.state_dict(), exclude=exclude)  # intersect
         model.load_state_dict(csd, strict=False)  # load
         LOGGER.info(f"Transferred {len(csd)}/{len(model.state_dict())} items from {weights}")  # report
     else:
-        model = Model(cfg, ch=3, nc=nc, anchors=hyp.get("anchors")).to(device)  # create
+        model = Model(cfg, ch=opt.input_ch, nc=nc, anchors=hyp.get("anchors")).to(device)  # create
     amp = check_amp(model)  # check AMP
 
     # Freeze
@@ -198,6 +199,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         if any(x in k for x in freeze):
             LOGGER.info(f"freezing {k}")
             v.requires_grad = False
+        await asyncio.sleep(0.001)
 
     # Image size
     gs = max(int(model.stride.max()), 32)  # grid size (max stride)
@@ -262,6 +264,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         prefix=colorstr("train: "),
         shuffle=True,
         seed=opt.seed,
+        input_ch = opt.input_ch
     )
     labels = np.concatenate(dataset.labels, 0)
     mlc = int(labels[:, 0].max())  # max label class
@@ -282,6 +285,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             workers=workers * 2,
             pad=0.5,
             prefix=colorstr("val: "),
+            input_ch = opt.input_ch,
         )[0]
 
         if not resume:
@@ -405,6 +409,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 callbacks.run("on_train_batch_end", model, ni, imgs, targets, paths, list(mloss))
                 if callbacks.stop_training:
                     return
+            await asyncio.sleep(0.001)
             # end batch ------------------------------------------------------------------------------------------------
 
         # Scheduler
@@ -470,35 +475,35 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 stop = broadcast_list[0]
         if stop:
             break  # must break all DDP ranks
-
+        await asyncio.sleep(0.001)
         # end epoch ----------------------------------------------------------------------------------------------------
     # end training -----------------------------------------------------------------------------------------------------
-    if RANK in {-1, 0}:
-        LOGGER.info(f"\n{epoch - start_epoch + 1} epochs completed in {(time.time() - t0) / 3600:.3f} hours.")
-        for f in last, best:
-            if f.exists():
-                strip_optimizer(f)  # strip optimizers
-                if f is best:
-                    LOGGER.info(f"\nValidating {f}...")
-                    results, _, _ = validate.run(
-                        data_dict,
-                        batch_size=batch_size // WORLD_SIZE * 2,
-                        imgsz=imgsz,
-                        model=attempt_load(f, device).half(),
-                        iou_thres=0.65 if is_coco else 0.60,  # best pycocotools at iou 0.65
-                        single_cls=single_cls,
-                        dataloader=val_loader,
-                        save_dir=save_dir,
-                        save_json=is_coco,
-                        verbose=True,
-                        plots=plots,
-                        callbacks=callbacks,
-                        compute_loss=compute_loss,
-                    )  # val best model with plots
-                    if is_coco:
-                        callbacks.run("on_fit_epoch_end", list(mloss) + list(results) + lr, epoch, best_fitness, fi)
+    # if RANK in {-1, 0}:
+    #     LOGGER.info(f"\n{epoch - start_epoch + 1} epochs completed in {(time.time() - t0) / 3600:.3f} hours.")
+    #     for f in last, best:
+    #         if f.exists():
+    #             strip_optimizer(f)  # strip optimizers
+    #             if f is best:
+    #                 LOGGER.info(f"\nValidating {f}...")
+    #                 results, _, _ = validate.run(
+    #                     data_dict,
+    #                     batch_size=batch_size // WORLD_SIZE * 2,
+    #                     imgsz=imgsz,
+    #                     model=attempt_load(f, device).half(),
+    #                     iou_thres=0.65 if is_coco else 0.60,  # best pycocotools at iou 0.65
+    #                     single_cls=single_cls,
+    #                     dataloader=val_loader,
+    #                     save_dir=save_dir,
+    #                     save_json=is_coco,
+    #                     verbose=True,
+    #                     plots=plots,
+    #                     callbacks=callbacks,
+    #                     compute_loss=compute_loss,
+    #                 )  # val best model with plots
+    #                 if is_coco:
+    #                     callbacks.run("on_fit_epoch_end", list(mloss) + list(results) + lr, epoch, best_fitness, fi)
 
-        callbacks.run("on_train_end", last, best, epoch, results)
+    #     # callbacks.run("on_train_end", last, best, epoch, results)
 
     torch.cuda.empty_cache()
     return results
@@ -556,15 +561,16 @@ def parse_opt(known=False):
     parser.add_argument("--ndjson-console", action="store_true", help="Log ndjson to console")
     parser.add_argument("--ndjson-file", action="store_true", help="Log ndjson to file")
 
+    parser.add_argument("--input_ch", type=int, default=3, help="Log ndjson to file")
     return parser.parse_known_args()[0] if known else parser.parse_args()
 
 
-def main(opt, callbacks=Callbacks()):
+async def main(opt, callbacks=Callbacks()):
     """Runs training or hyperparameter evolution with specified options and optional callbacks."""
-    if RANK in {-1, 0}:
-        print_args(vars(opt))
-        check_git_status()
-        check_requirements(ROOT / "requirements.txt")
+    # if RANK in {-1, 0}:
+        # print_args(vars(opt))
+        # check_git_status()
+        # check_requirements(ROOT / "requirements.txt")
 
     # Resume (from specified or most recent last.pt)
     if opt.resume and not check_comet_resume(opt) and not opt.evolve:
@@ -595,7 +601,8 @@ def main(opt, callbacks=Callbacks()):
             opt.exist_ok, opt.resume = opt.resume, False  # pass resume to exist_ok and disable resume
         if opt.name == "cfg":
             opt.name = Path(opt.cfg).stem  # use model.yaml as name
-        opt.save_dir = str(increment_path(Path(opt.project) / opt.name, exist_ok=opt.exist_ok))
+        # opt.save_dir = str(increment_path(Path(opt.project) / opt.name, exist_ok=opt.exist_ok))
+        opt.save_dir  = str(Path(opt.project) / opt.name)
 
     # DDP mode
     device = select_device(opt.device, batch_size=opt.batch_size)
@@ -614,7 +621,7 @@ def main(opt, callbacks=Callbacks()):
 
     # Train
     if not opt.evolve:
-        train(opt.hyp, opt, device, callbacks)
+        await train(opt.hyp, opt, device, callbacks)
 
     # Evolve hyperparameters (optional)
     else:
@@ -836,7 +843,33 @@ def run(**kwargs):
     main(opt)
     return opt
 
+async def yolov5_train(task_name,model_save_path,data_dir,batch_size,epochs):
+    opt = parse_opt()
+    #{key}_{version}_{model_type}_{input_ch}
+    task_name_contents = task_name.split("_")
+    model_type = str(task_name_contents[-2])
+    if model_type == 'yolov5m':
+        opt.cfg =  './yolov5/models/yolov5m.yaml'
+        opt.weights = ""
+    elif model_type == 'yolov5n':
+        opt.cfg =  './yolov5/models/yolov5n.yaml'
+        opt.weights = ""
+    opt.batch_size = batch_size
+    opt.input_ch = int(task_name_contents[-1])
+    opt.project,opt.name = model_save_path.rsplit('/',1)[0],model_save_path.rsplit('/',1)[1]
+    opt.device = '0'
+    opt.epochs = epochs
+    opt.data = data_dir+f'/{task_name}.yaml'
+    opt.noplots  = True
+    await main(opt)
+    return True
 
 if __name__ == "__main__":
-    opt = parse_opt()
-    main(opt)
+    # opt = parse_opt()
+    # main(opt)
+    task_name = 'test1'
+    model_type = 'yolov5m'
+    input_ch = 3
+    batch_size = 16
+    epochs = 300
+    yolov5_train(task_name=task_name,model_type=model_type,input_ch=input_ch,batch_size=batch_size,epochs=epochs)

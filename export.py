@@ -776,6 +776,7 @@ def run(
     topk_all=100,  # TF.js NMS: topk for all classes to keep
     iou_thres=0.45,  # TF.js NMS: IoU threshold
     conf_thres=0.25,  # TF.js NMS: confidence threshold
+    input_ch = 1,
 ):
     t = time.time()
     include = [x.lower() for x in include]  # to lowercase
@@ -800,7 +801,7 @@ def run(
     # Input
     gs = int(max(model.stride))  # grid size (max stride)
     imgsz = [check_img_size(x, gs) for x in imgsz]  # verify img_size are gs-multiples
-    im = torch.zeros(batch_size, 3, *imgsz).to(device)  # image size(1,3,320,192) BCHW iDetection
+    im = torch.zeros(batch_size, input_ch, *imgsz).to(device)  # image size(1,3,320,192) BCHW iDetection
 
     # Update model
     model.eval()
@@ -913,6 +914,7 @@ def parse_opt(known=False):
     parser.add_argument("--topk-all", type=int, default=100, help="TF.js NMS: topk for all classes to keep")
     parser.add_argument("--iou-thres", type=float, default=0.45, help="TF.js NMS: IoU threshold")
     parser.add_argument("--conf-thres", type=float, default=0.25, help="TF.js NMS: confidence threshold")
+    parser.add_argument("--input_ch", type=int, default=1, help="TF.js NMS: confidence threshold")
     parser.add_argument(
         "--include",
         nargs="+",
@@ -929,6 +931,13 @@ def main(opt):
     for opt.weights in opt.weights if isinstance(opt.weights, list) else [opt.weights]:
         run(**vars(opt))
 
+def yolov5_export(model_path,input_ch,use_cuda=False):
+    opt = parse_opt()
+    opt.include = ["torchscript"]
+    opt.device='0' if use_cuda else 'cpu'
+    opt.weights = model_path
+    opt.input_ch = input_ch
+    main(opt)
 
 if __name__ == "__main__":
     opt = parse_opt()
